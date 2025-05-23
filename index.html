@@ -34,6 +34,7 @@
         #map-canvas {
             position: absolute;
             transition: transform 0.1s ease-out;
+            touch-action: none; /* 禁用默认触控行为 */
         }
 
         .tile {
@@ -164,6 +165,11 @@
                 this.lastMouseX = 0;
                 this.lastMouseY = 0;
 
+                // 触控相关变量
+                this.touches = [];
+                this.lastTouchDistance = 0;
+                this.isZooming = false;
+
                 this.mapContainer = document.getElementById('map-container');
                 this.mapCanvas = document.getElementById('map-canvas');
                 this.currentZoomSpan = document.getElementById('current-zoom');
@@ -206,6 +212,7 @@
 
                 // 鼠标拖拽
                 this.mapContainer.addEventListener('mousedown', (e) => {
+                    if (e.touches) return; // 如果是触控事件，忽略鼠标事件
                     this.isDragging = true;
                     this.lastMouseX = e.clientX;
                     this.lastMouseY = e.clientY;
@@ -213,7 +220,7 @@
                 });
 
                 document.addEventListener('mousemove', (e) => {
-                    if (!this.isDragging) return;
+                    if (!this.isDragging || e.touches) return;
 
                     const deltaX = e.clientX - this.lastMouseX;
                     const deltaY = e.clientY - this.lastMouseY;
@@ -235,6 +242,87 @@
                     }
                 });
 
+                // 触控事件处理
+                this.mapContainer.addEventListener('touchstart', (e) => {
+                    e.preventDefault();
+                    this.touches = Array.from(e.touches);
+                    
+                    if (this.touches.length === 1) {
+                        // 单指拖拽
+                        this.isDragging = true;
+                        this.lastMouseX = this.touches[0].clientX;
+                        this.lastMouseY = this.touches[0].clientY;
+                    } else if (this.touches.length === 2) {
+                        // 双指缩放
+                        this.isDragging = false;
+                        this.isZooming = true;
+                        this.lastTouchDistance = this.getTouchDistance(this.touches);
+                    }
+                });
+
+                this.mapContainer.addEventListener('touchmove', (e) => {
+                    e.preventDefault();
+                    this.touches = Array.from(e.touches);
+                    
+                    if (this.touches.length === 1 && this.isDragging && !this.isZooming) {
+                        // 单指拖拽
+                        const deltaX = this.touches[0].clientX - this.lastMouseX;
+                        const deltaY = this.touches[0].clientY - this.lastMouseY;
+
+                        this.offsetX += deltaX;
+                        this.offsetY += deltaY;
+
+                        this.lastMouseX = this.touches[0].clientX;
+                        this.lastMouseY = this.touches[0].clientY;
+
+                        this.updateTransform();
+                        this.updateCoordinates();
+                    } else if (this.touches.length === 2 && this.isZooming) {
+                        // 双指缩放
+                        const currentDistance = this.getTouchDistance(this.touches);
+                        const distanceChange = currentDistance - this.lastTouchDistance;
+                        
+                        // 根据距离变化调整缩放
+                        if (Math.abs(distanceChange) > 10) { // 防止过于敏感
+                            const zoomDirection = distanceChange > 0 ? -1 : 1; // 注意方向
+                            const newZoom = Math.max(0, Math.min(4, this.currentZoom + zoomDirection));
+                            
+                            if (newZoom !== this.currentZoom) {
+                                // 计算双指中心点进行缩放
+                                const centerX = (this.touches[0].clientX + this.touches[1].clientX) / 2;
+                                const centerY = (this.touches[0].clientY + this.touches[1].clientY) / 2;
+                                this.setZoomAtPoint(newZoom, centerX, centerY);
+                                
+                                // 更新按钮状态
+                                document.querySelectorAll('.zoom-btn').forEach(b => b.classList.remove('active'));
+                                document.querySelector(`[data-zoom="${newZoom}"]`).classList.add('active');
+                            }
+                            
+                            this.lastTouchDistance = currentDistance;
+                        }
+                    }
+                });
+
+                this.mapContainer.addEventListener('touchend', (e) => {
+                    e.preventDefault();
+                    this.touches = Array.from(e.touches);
+                    
+                    if (this.touches.length === 0) {
+                        // 所有手指离开
+                        if (this.isDragging) {
+                            this.isDragging = false;
+                            this.render(); // 重新渲染可见区域
+                        }
+                        this.isZooming = false;
+                    } else if (this.touches.length === 1) {
+                        // 从双指变为单指
+                        this.isZooming = false;
+                        this.isDragging = true;
+                        this.lastMouseX = this.touches[0].clientX;
+                        this.lastMouseY = this.touches[0].clientY;
+                    }
+                });
+
                 // 窗口大小变化
                 window.addEventListener('resize', () => {
                     this.viewportWidth = window.innerWidth;
@@ -253,6 +341,32 @@
                         document.querySelector(`[data-zoom="${newZoom}"]`).classList.add('active');
                     }
                 });
+            }
+
+            // 计算两个触点之间的距离
+            getTouchDistance(touches) {
+                if (touches.length < 2) return 0;
+                
+                const dx = touches[0].clientX - touches[1].clientX;
+                const dy = touches[0].clientY - touches[1].clientY;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+
+            // 在指定点进行缩放（用于双指缩放）
+            setZoomAtPoint(zoom, pointX, pointY) {
+                // 计算指定点对应的世界坐标
+                const worldX = (pointX - this.offsetX) / this.tileSize + this.centerX;
+                const worldY = this.centerY - (pointY - this.offsetY) / this.tileSize;
+                
+                // 更新缩放级别
+                this.currentZoom = zoom;
+                this.currentZoomSpan.textContent = zoom;
+                
+                // 重新计算偏移量，保持指定点的世界坐标不变
+                this.offsetX = pointX - (worldX - this.centerX) * this.tileSize;
+                this.offsetY = pointY - (this.centerY - worldY) * this.tileSize;
+                
+                this.render();
             }
 
             setZoom(zoom) {
