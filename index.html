@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Echoes of Terra Map Viewer</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            overflow: hidden;
+        }
+
+        #map-container {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            cursor: grab;
+            background: #000;
+        }
+
+        #map-container:active {
+            cursor: grabbing;
+        }
+
+        #map-canvas {
+            position: absolute;
+            transition: transform 0.1s ease-out;
+        }
+
+        .tile {
+            position: absolute;
+            width: 256px;
+            height: 256px;
+            background-size: cover;
+            background-position: center;
+            /* border: 1px solid rgba(255, 255, 255, 0.1); */
+        }
+
+        #controls {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            z-index: 1000;
+        }
+
+        #zoom-level {
+            margin-bottom: 10px;
+            font-size: 14px;
+        }
+
+        #zoom-buttons {
+            display: flex;
+            gap: 5px;
+            margin-bottom: 10px;
+        }
+
+        .zoom-btn {
+            background: #333;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+
+        .zoom-btn:hover {
+            background: #555;
+        }
+
+        .zoom-btn.active {
+            background: #0066cc;
+        }
+
+        #coordinates {
+            font-size: 12px;
+            color: #ccc;
+        }
+
+        #info {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid #333;
+            font-size: 12px;
+            color: #ccc;
+        }
+
+        .loading {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+
+        a {
+            color: #0066cc;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="map-container">
+        <div id="map-canvas"></div>
+    </div>
+
+    <div id="controls">
+        <div id="zoom-level">缩放级别: <span id="current-zoom">0</span></div>
+        <div id="zoom-buttons">
+            <button class="zoom-btn active" data-zoom="0">0</button>
+            <button class="zoom-btn" data-zoom="1">1</button>
+            <button class="zoom-btn" data-zoom="2">2</button>
+            <button class="zoom-btn" data-zoom="3">3</button>
+            <button class="zoom-btn" data-zoom="4">4</button>
+        </div>
+        <div id="coordinates">
+            X: <span id="coord-x">500</span>, Y: <span id="coord-y">500</span>
+        </div>
+    </div>
+
+    <div id="info">
+        <p>地图数据来自 Echoes of Terra</p>
+        <p>资源版权归 <a href="https://ak.hypergryph.com/">鹰角网络</a> 所有</p>
+        <p>本项目(<a href="https://github.com/RavelloH/EchoesOfTerraMap">RavelloH/EchoesOfTerraMap</a>)只是一个开源地图查看器。</p>
+    </div>
+
+    <div id="loading" class="loading" style="display: none;">
+        加载地图数据中...
+    </div>
+
+    <script>
+        class MapViewer {
+            constructor() {
+                this.mapData = null;
+                this.currentZoom = 0;
+                this.centerX = 500;
+                this.centerY = 500;
+                this.tileSize = 256;
+                this.viewportWidth = window.innerWidth;
+                this.viewportHeight = window.innerHeight;
+                this.offsetX = 0;
+                this.offsetY = 0;
+                this.isDragging = false;
+                this.lastMouseX = 0;
+                this.lastMouseY = 0;
+
+                this.mapContainer = document.getElementById('map-container');
+                this.mapCanvas = document.getElementById('map-canvas');
+                this.currentZoomSpan = document.getElementById('current-zoom');
+                this.coordXSpan = document.getElementById('coord-x');
+                this.coordYSpan = document.getElementById('coord-y');
+
+                this.init();
+            }
+
+            async init() {
+                await this.loadMapData();
+                this.setupEventListeners();
+                this.render();
+            }
+
+            async loadMapData() {
+                try {
+                    document.getElementById('loading').style.display = 'block';
+                    const response = await fetch('./index.json');
+                    this.mapData = await response.json();
+                    document.getElementById('loading').style.display = 'none';
+                } catch (error) {
+                    console.error('Failed to load map data:', error);
+                    document.getElementById('loading').innerHTML = '加载地图数据失败';
+                }
+            }
+
+            setupEventListeners() {
+                // 缩放控制
+                document.querySelectorAll('.zoom-btn').forEach(btn => {
+                    btn.addEventListener('click', (e) => {
+                        const zoom = parseInt(e.target.dataset.zoom);
+                        this.setZoom(zoom);
+                        
+                        // 更新按钮状态
+                        document.querySelectorAll('.zoom-btn').forEach(b => b.classList.remove('active'));
+                        e.target.classList.add('active');
+                    });
+                });
+
+                // 鼠标拖拽
+                this.mapContainer.addEventListener('mousedown', (e) => {
+                    this.isDragging = true;
+                    this.lastMouseX = e.clientX;
+                    this.lastMouseY = e.clientY;
+                    e.preventDefault();
+                });
+
+                document.addEventListener('mousemove', (e) => {
+                    if (!this.isDragging) return;
+
+                    const deltaX = e.clientX - this.lastMouseX;
+                    const deltaY = e.clientY - this.lastMouseY;
+
+                    this.offsetX += deltaX;
+                    this.offsetY += deltaY;
+
+                    this.lastMouseX = e.clientX;
+                    this.lastMouseY = e.clientY;
+
+                    this.updateTransform();
+                    this.updateCoordinates();
+                });
+
+                document.addEventListener('mouseup', () => {
+                    if (this.isDragging) {
+                        this.isDragging = false;
+                        this.render(); // 重新渲染可见区域
+                    }
+                });
+
+                // 窗口大小变化
+                window.addEventListener('resize', () => {
+                    this.viewportWidth = window.innerWidth;
+                    this.viewportHeight = window.innerHeight;
+                    this.render();
+                });
+
+                // 鼠标滚轮缩放
+                this.mapContainer.addEventListener('wheel', (e) => {
+                    e.preventDefault();
+                    const delta = e.deltaY > 0 ? 1 : -1;
+                    const newZoom = Math.max(0, Math.min(4, this.currentZoom + delta));
+                    if (newZoom !== this.currentZoom) {
+                        this.setZoom(newZoom);
+                        document.querySelectorAll('.zoom-btn').forEach(b => b.classList.remove('active'));
+                        document.querySelector(`[data-zoom="${newZoom}"]`).classList.add('active');
+                    }
+                });
+            }
+
+            setZoom(zoom) {
+                // 记录当前视口中心点的世界坐标
+                const viewportCenterX = this.viewportWidth / 2;
+                const viewportCenterY = this.viewportHeight / 2;
+                
+                // 计算当前视口中心对应的地图坐标（世界坐标）
+                const worldCenterX = (viewportCenterX - this.offsetX) / this.tileSize + this.centerX;
+                const worldCenterY = this.centerY - (viewportCenterY - this.offsetY) / this.tileSize;
+                
+                // 更新缩放级别
+                this.currentZoom = zoom;
+                this.currentZoomSpan.textContent = zoom;
+                
+                // 重新计算偏移量，保持世界坐标中心点在视口中心
+                this.offsetX = viewportCenterX - (worldCenterX - this.centerX) * this.tileSize;
+                this.offsetY = viewportCenterY - (this.centerY - worldCenterY) * this.tileSize;
+                
+                this.render();
+            }
+
+            updateTransform() {
+                this.mapCanvas.style.transform = `translate(${this.offsetX}px, ${this.offsetY}px)`;
+            }
+
+            updateCoordinates() {
+                // 计算当前视图中心对应的地图坐标
+                const viewportCenterX = this.viewportWidth / 2;
+                const viewportCenterY = this.viewportHeight / 2;
+                
+                const centerMapX = (viewportCenterX - this.offsetX) / this.tileSize + this.centerX;
+                const centerMapY = this.centerY - (viewportCenterY - this.offsetY) / this.tileSize;
+                
+                this.coordXSpan.textContent = Math.round(centerMapX);
+                this.coordYSpan.textContent = Math.round(centerMapY);
+            }
+
+            render() {
+                if (!this.mapData || !this.mapData[this.currentZoom]) return;
+
+                // 清空当前地图
+                this.mapCanvas.innerHTML = '';
+
+                const zoomData = this.mapData[this.currentZoom];
+                
+                // 收集所有瓦片信息并按层级排序
+                const allTiles = [];
+                for (const [chunkKey, tiles] of Object.entries(zoomData)) {
+                    tiles.forEach(tileFile => {
+                        const match = tileFile.match(/r_(\d+)_([^_]+)_(\d+)_(\d+)\.png/);
+                        if (match) {
+                            const [, zoomLevel, chunk, x, y] = match;
+                            const tileX = parseInt(x);
+                            const tileY = parseInt(y);
+                            
+                            // 计算瓦片在屏幕上的位置
+                            const screenX = (tileX - this.centerX) * this.tileSize;
+                            const screenY = (tileY - this.centerY) * this.tileSize;
+                            
+                            // 检查是否在可视范围内
+                            const buffer = this.tileSize * 2;
+                            if (screenX >= -this.offsetX - buffer && 
+                                screenX <= -this.offsetX + this.viewportWidth + buffer &&
+                                screenY >= -this.offsetY - buffer && 
+                                screenY <= -this.offsetY + this.viewportHeight + buffer) {
+                                
+                                allTiles.push({
+                                    file: tileFile,
+                                    chunk: chunk,
+                                    x: tileX,
+                                    y: tileY,
+                                    screenX: screenX,
+                                    screenY: screenY,
+                                    zIndex: this.calculateZIndex(chunk)
+                                });
+                            }
+                        }
+                    });
+                }
+                
+                // 按z-index排序（小的先渲染，大的后渲染，这样大的会在上面）
+                allTiles.sort((a, b) => a.zIndex - b.zIndex);
+                
+                // 渲染瓦片
+                allTiles.forEach(tileInfo => {
+                    this.createTileFromInfo(tileInfo);
+                });
+
+                this.updateTransform();
+                this.updateCoordinates();
+            }
+
+            createTile(tileFile, chunkKey) {
+                // 解析文件名获取坐标 r_0_10_495_503.png
+                const match = tileFile.match(/r_(\d+)_([^_]+)_(\d+)_(\d+)\.png/);
+                if (!match) return;
+
+                const [, zoomLevel, chunk, x, y] = match;
+                const tileX = parseInt(x);
+                const tileY = parseInt(y);
+
+                // 计算瓦片在屏幕上的位置（以500,500为中心）
+                const screenX = (tileX - this.centerX) * this.tileSize;
+                const screenY = (tileY - this.centerY) * this.tileSize; // Y轴翻转
+
+                // 检查是否在可视范围内（包含缓冲区）
+                const buffer = this.tileSize * 2;
+                if (screenX < -this.offsetX - buffer || 
+                    screenX > -this.offsetX + this.viewportWidth + buffer ||
+                    screenY < -this.offsetY - buffer || 
+                    screenY > -this.offsetY + this.viewportHeight + buffer) {
+                    return; // 不在可视范围内，跳过
+                }
+
+                const tile = document.createElement('div');
+                tile.className = 'tile';
+                tile.style.left = `${screenX}px`;
+                tile.style.top = `${screenY}px`;
+                
+                // 计算z-index：数字和字母越小，层级越高
+                const zIndex = this.calculateZIndex(chunk);
+                tile.style.zIndex = zIndex;
+                
+                // 尝试加载图片
+                const img = new Image();
+                img.onload = () => {
+                    tile.style.backgroundImage = `url(./map/${tileFile})`;
+                };
+                img.onerror = () => {
+                    // 如果图片加载失败，显示占位符
+                    tile.style.backgroundColor = '#333';
+                    tile.style.border = '1px solid #666';
+                    tile.innerHTML = `<div style="padding: 10px; font-size: 10px; color: #999;">${tileX},${tileY}<br>Layer: ${chunk}<br>Z: ${zIndex}</div>`;
+                };
+                img.src = `./map/${tileFile}`;
+
+                this.mapCanvas.appendChild(tile);
+            }
+
+            calculateZIndex(chunk) {
+                if (!this.mapData["z-index"][chunk] && this.mapData["z-index"][chunk] !== 0) console.log("没有找到层级数据", chunk);
+                return this.mapData["z-index"][chunk]
+            }
+            
+
+            render() {
+                if (!this.mapData || !this.mapData[this.currentZoom]) return;
+
+                // 清空当前地图
+                this.mapCanvas.innerHTML = '';
+
+                const zoomData = this.mapData[this.currentZoom];
+                
+                // 收集所有瓦片信息并按层级排序
+                const allTiles = [];
+                for (const [chunkKey, tiles] of Object.entries(zoomData)) {
+                    tiles.forEach(tileFile => {
+                        const match = tileFile.match(/r_(\d+)_([^_]+)_(\d+)_(\d+)\.png/);
+                        if (match) {
+                            const [, zoomLevel, chunk, x, y] = match;
+                            const tileX = parseInt(x);
+                            const tileY = parseInt(y);
+                            
+                            // 计算瓦片在屏幕上的位置
+                            const screenX = (tileX - this.centerX) * this.tileSize;
+                            const screenY = (tileY - this.centerY) * this.tileSize;
+                            
+                            // 检查是否在可视范围内
+                            const buffer = this.tileSize * 2;
+                            if (screenX >= -this.offsetX - buffer && 
+                                screenX <= -this.offsetX + this.viewportWidth + buffer &&
+                                screenY >= -this.offsetY - buffer && 
+                                screenY <= -this.offsetY + this.viewportHeight + buffer) {
+                                
+                                allTiles.push({
+                                    file: tileFile,
+                                    chunk: chunk,
+                                    x: tileX,
+                                    y: tileY,
+                                    screenX: screenX,
+                                    screenY: screenY,
+                                    zIndex: this.calculateZIndex(chunk)
+                                });
+                            }
+                        }
+                    });
+                }
+                
+                // 按z-index排序（小的先渲染，大的后渲染，这样大的会在上面）
+                allTiles.sort((a, b) => a.zIndex - b.zIndex);
+                
+                // 渲染瓦片
+                allTiles.forEach(tileInfo => {
+                    this.createTileFromInfo(tileInfo);
+                });
+
+                this.updateTransform();
+                this.updateCoordinates();
+            }
+
+            createTileFromInfo(tileInfo) {
+                const tile = document.createElement('div');
+                tile.className = 'tile';
+                tile.style.left = `${tileInfo.screenX}px`;
+                tile.style.top = `${tileInfo.screenY}px`;
+                tile.style.zIndex = tileInfo.zIndex;
+                
+                // 尝试加载图片
+                const img = new Image();
+                img.onload = () => {
+                    tile.style.backgroundImage = `url(./map/${tileInfo.file})`;
+                };
+                img.onerror = () => {
+                    // 如果图片加载失败，显示占位符
+                    tile.style.backgroundColor = '#333';
+                    /* tile.style.border = '1px solid #666'; */
+                    tile.innerHTML = `<div style="padding: 10px; font-size: 10px; color: #999;">${tileInfo.x},${tileInfo.y}<br>Layer: ${tileInfo.chunk}<br>Z: ${tileInfo.zIndex}</div>`;
+                };
+                img.src = `./map/${tileInfo.file}`;
+
+                this.mapCanvas.appendChild(tile);
+            }
+        }
+
+        // 初始化地图查看器
+        document.addEventListener('DOMContentLoaded', () => {
+            new MapViewer();
+        });
+    </script>
+    <script defer src="https://analytics.ravelloh.top/script.js" data-website-id="3844fb6d-2dee-4d65-b84a-25b31b053d0e"></script>
+</body>
+</html>
