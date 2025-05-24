@@ -43,7 +43,17 @@
             height: 256px;
             background-size: cover;
             background-position: center;
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out;
             /* border: 1px solid rgba(255, 255, 255, 0.1); */
+        }
+
+        .tile.loaded {
+            opacity: 1;
+        }
+
+        .tile.preloaded {
+            opacity: 0.8;
         }
 
         #controls {
@@ -169,6 +179,11 @@
                 this.touches = [];
                 this.lastTouchDistance = 0;
                 this.isZooming = false;
+
+                // 预载相关
+                this.preloadBuffer = 2; // 预载缓冲区大小（瓦片数量）
+                this.loadedTiles = new Set(); // 已加载的瓦片集合
+                this.preloadQueue = []; // 预载队列
 
                 this.mapContainer = document.getElementById('map-container');
                 this.mapCanvas = document.getElementById('map-canvas');
@@ -354,27 +369,33 @@
 
             // 在指定点进行缩放（用于双指缩放）
             setZoomAtPoint(zoom, pointX, pointY) {
-                // 计算指定点对应的世界坐标
-                const worldX = (pointX - this.offsetX) / this.tileSize + this.centerX;
-                const worldY = this.centerY - (pointY - this.offsetY) / this.tileSize;
+                // 计算相对于视口的点坐标
+                const rect = this.mapContainer.getBoundingClientRect();
+                const relativeX = pointX - rect.left;
+                const relativeY = pointY - rect.top;
+                
+                // 计算该点对应的世界坐标
+                const worldX = (relativeX - this.offsetX) / this.tileSize + this.centerX;
+                const worldY = this.centerY - (relativeY - this.offsetY) / this.tileSize;
                 
                 // 更新缩放级别
                 this.currentZoom = zoom;
                 this.currentZoomSpan.textContent = zoom;
                 
                 // 重新计算偏移量，保持指定点的世界坐标不变
-                this.offsetX = pointX - (worldX - this.centerX) * this.tileSize;
-                this.offsetY = pointY - (this.centerY - worldY) * this.tileSize;
+                this.offsetX = relativeX - (worldX - this.centerX) * this.tileSize;
+                this.offsetY = relativeY - (this.centerY - worldY) * this.tileSize;
                 
+                this.loadedTiles.clear(); // 清空已加载瓦片记录
                 this.render();
             }
 
             setZoom(zoom) {
-                // 记录当前视口中心点的世界坐标
+                // 记录当前视口中心点的屏幕坐标
                 const viewportCenterX = this.viewportWidth / 2;
                 const viewportCenterY = this.viewportHeight / 2;
                 
-                // 计算当前视口中心对应的地图坐标（世界坐标）
+                // 计算当前视口中心对应的世界坐标
                 const worldCenterX = (viewportCenterX - this.offsetX) / this.tileSize + this.centerX;
                 const worldCenterY = this.centerY - (viewportCenterY - this.offsetY) / this.tileSize;
                 
@@ -386,6 +407,7 @@
                 this.offsetX = viewportCenterX - (worldCenterX - this.centerX) * this.tileSize;
                 this.offsetY = viewportCenterY - (this.centerY - worldCenterY) * this.tileSize;
                 
+                this.loadedTiles.clear(); // 清空已加载瓦片记录
                 this.render();
             }
 
@@ -404,6 +426,130 @@
                 this.coordXSpan.textContent = Math.round(centerMapX);
                 this.coordYSpan.textContent = Math.round(centerMapY);
             }
+
+            render() {
+                if (!this.mapData || !this.mapData[this.currentZoom]) return;
+
+                // 清空当前地图
+                this.mapCanvas.innerHTML = '';
+                
+                const zoomData = this.mapData[this.currentZoom];
+                
+                // 收集可视区域的瓦片
+                const visibleTiles = [];
+                const preloadTiles = [];
+                
+                for (const [chunkKey, tiles] of Object.entries(zoomData)) {
+                    tiles.forEach(tileFile => {
+                        const match = tileFile.match(/r_(\d+)_([^_]+)_(\d+)_(\d+)\.png/);
+                        if (match) {
+                            const [, zoomLevel, chunk, x, y] = match;
+                            const tileX = parseInt(x);
+                            const tileY = parseInt(y);
+                            
+                            // 计算瓦片在屏幕上的位置
+                            const screenX = (tileX - this.centerX) * this.tileSize;
+                            const screenY = (tileY - this.centerY) * this.tileSize;
+                            
+                            const tileInfo = {
+                                file: tileFile,
+                                chunk: chunk,
+                                x: tileX,
+                                y: tileY,
+                                screenX: screenX,
+                                screenY: screenY,
+                                zIndex: this.calculateZIndex(chunk)
+                            };
+                            
+                            // 检查是否在可视范围内
+                            const visibleBuffer = this.tileSize;
+                            if (screenX >= -this.offsetX - visibleBuffer && 
+                                screenX <= -this.offsetX + this.viewportWidth + visibleBuffer &&
+                                screenY >= -this.offsetY - visibleBuffer && 
+                                screenY <= -this.offsetY + this.viewportHeight + visibleBuffer) {
+                                visibleTiles.push(tileInfo);
+                            } else {
+                                // 检查是否在预载范围内
+                                const preloadBuffer = this.tileSize * (this.preloadBuffer + 1);
+                                if (screenX >= -this.offsetX - preloadBuffer && 
+                                    screenX <= -this.offsetX + this.viewportWidth + preloadBuffer &&
+                                    screenY >= -this.offsetY - preloadBuffer && 
+                                    screenY <= -this.offsetY + this.viewportHeight + preloadBuffer) {
+                                    preloadTiles.push(tileInfo);
+                                }
+                            }
+                        }
+                    });
+                }
+                
+                // 按z-index排序
+                visibleTiles.sort((a, b) => a.zIndex - b.zIndex);
+                preloadTiles.sort((a, b) => a.zIndex - b.zIndex);
+                
+                // 渲染可视瓦片
+                visibleTiles.forEach(tileInfo => {
+                    this.createTileFromInfo(tileInfo, false);
+                });
+                
+                // 预载瓦片
+                this.preloadTiles(preloadTiles);
+
+                this.updateTransform();
+                this.updateCoordinates();
+            }
+
+            preloadTiles(tiles) {
+                // 清空预载队列
+                this.preloadQueue = [];
+                
+                // 添加到预载队列
+                tiles.forEach(tileInfo => {
+                    const tileKey = `${tileInfo.file}_${this.currentZoom}`;
+                    if (!this.loadedTiles.has(tileKey)) {
+                        this.preloadQueue.push(tileInfo);
+                    }
+                });
+                
+                // 开始预载
+                this.processPreloadQueue();
+            }
+
+            processPreloadQueue() {
+                if (this.preloadQueue.length === 0) return;
+                
+                // 每次处理几个瓦片，避免阻塞
+                const batchSize = 3;
+                const batch = this.preloadQueue.splice(0, batchSize);
+                
+                batch.forEach(tileInfo => {
+                    this.preloadTile(tileInfo);
+                });
+                
+                // 继续处理剩余的瓦片
+                if (this.preloadQueue.length > 0) {
+                    setTimeout(() => this.processPreloadQueue(), 50);
+                }
+            }
+
+            preloadTile(tileInfo) {
+                const tileKey = `${tileInfo.file}_${this.currentZoom}`;
+                if (this.loadedTiles.has(tileKey)) return;
+                
+                const img = new Image();
+                img.onload = () => {
+                    this.loadedTiles.add(tileKey);
+                };
+                img.onerror = () => {
+                    // 预载失败，不做特殊处理
+                };
+                img.src = `./map/${tileInfo.file}`;
+            }
+
+            calculateZIndex(chunk) {
+                if (!this.mapData["z-index"][chunk] && this.mapData["z-index"][chunk] !== 0) console.log("没有找到层级数据", chunk);
+                return this.mapData["z-index"][chunk]
+            }
+            
 
             render() {
                 if (!this.mapData || !this.mapData[this.currentZoom]) return;
@@ -507,86 +653,45 @@
                 this.mapCanvas.appendChild(tile);
             }
 
-            calculateZIndex(chunk) {
-                if (!this.mapData["z-index"][chunk] && this.mapData["z-index"][chunk] !== 0) console.log("没有找到层级数据", chunk);
-                return this.mapData["z-index"][chunk]
-            }
-            
-
-            render() {
-                if (!this.mapData || !this.mapData[this.currentZoom]) return;
-
-                // 清空当前地图
-                this.mapCanvas.innerHTML = '';
-
-                const zoomData = this.mapData[this.currentZoom];
-                
-                // 收集所有瓦片信息并按层级排序
-                const allTiles = [];
-                for (const [chunkKey, tiles] of Object.entries(zoomData)) {
-                    tiles.forEach(tileFile => {
-                        const match = tileFile.match(/r_(\d+)_([^_]+)_(\d+)_(\d+)\.png/);
-                        if (match) {
-                            const [, zoomLevel, chunk, x, y] = match;
-                            const tileX = parseInt(x);
-                            const tileY = parseInt(y);
-                            
-                            // 计算瓦片在屏幕上的位置
-                            const screenX = (tileX - this.centerX) * this.tileSize;
-                            const screenY = (tileY - this.centerY) * this.tileSize;
-                            
-                            // 检查是否在可视范围内
-                            const buffer = this.tileSize * 2;
-                            if (screenX >= -this.offsetX - buffer && 
-                                screenX <= -this.offsetX + this.viewportWidth + buffer &&
-                                screenY >= -this.offsetY - buffer && 
-                                screenY <= -this.offsetY + this.viewportHeight + buffer) {
-                                
-                                allTiles.push({
-                                    file: tileFile,
-                                    chunk: chunk,
-                                    x: tileX,
-                                    y: tileY,
-                                    screenX: screenX,
-                                    screenY: screenY,
-                                    zIndex: this.calculateZIndex(chunk)
-                                });
-                            }
-                        }
-                    });
-                }
-                
-                // 按z-index排序（小的先渲染，大的后渲染，这样大的会在上面）
-                allTiles.sort((a, b) => a.zIndex - b.zIndex);
-                
-                // 渲染瓦片
-                allTiles.forEach(tileInfo => {
-                    this.createTileFromInfo(tileInfo);
-                });
-
-                this.updateTransform();
-                this.updateCoordinates();
-            }
-
-            createTileFromInfo(tileInfo) {
+            createTileFromInfo(tileInfo, isPreload = false) {
                 const tile = document.createElement('div');
                 tile.className = 'tile';
                 tile.style.left = `${tileInfo.screenX}px`;
                 tile.style.top = `${tileInfo.screenY}px`;
                 tile.style.zIndex = tileInfo.zIndex;
                 
+                const tileKey = `${tileInfo.file}_${this.currentZoom}`;
+                
                 // 尝试加载图片
                 const img = new Image();
                 img.onload = () => {
                     tile.style.backgroundImage = `url(./map/${tileInfo.file})`;
+                    // 添加加载完成的动画类
+                    requestAnimationFrame(() => {
+                        tile.classList.add('loaded');
+                    });
+                    this.loadedTiles.add(tileKey);
                 };
                 img.onerror = () => {
                     // 如果图片加载失败，显示占位符
                     tile.style.backgroundColor = '#333';
                     /* tile.style.border = '1px solid #666'; */
                     tile.innerHTML = `<div style="padding: 10px; font-size: 10px; color: #999;">${tileInfo.x},${tileInfo.y}<br>Layer: ${tileInfo.chunk}<br>Z: ${tileInfo.zIndex}</div>`;
+                    // 即使失败也添加loaded类以显示占位符
+                    requestAnimationFrame(() => {
+                        tile.classList.add('loaded');
+                    });
                 };
-                img.src = `./map/${tileInfo.file}`;
+                
+                // 如果瓦片已经预载过，立即显示
+                if (this.loadedTiles.has(tileKey)) {
+                    img.src = `./map/${tileInfo.file}`;
+                } else {
+                    // 延迟一帧再开始加载，确保DOM更新
+                    requestAnimationFrame(() => {
+                        img.src = `./map/${tileInfo.file}`;
+                    });
+                }
 
                 this.mapCanvas.appendChild(tile);
             }
