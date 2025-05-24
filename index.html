@@ -72,6 +72,12 @@
             font-size: 14px;
         }
 
+        #loading-progress {
+            font-size: 12px;
+            color: #0066cc;
+            margin-top: 5px;
+        }
+
         #zoom-buttons {
             display: flex;
             gap: 5px;
@@ -136,7 +142,12 @@
     </div>
 
     <div id="controls">
-        <div id="zoom-level">缩放级别: <span id="current-zoom">0</span></div>
+        <div id="zoom-level">
+            缩放级别: <span id="current-zoom">0</span>
+            <div id="loading-progress">
+                加载进度: <span id="loaded-tiles">0</span>/<span id="total-tiles">0</span>
+            </div>
+        </div>
         <div id="zoom-buttons">
             <button class="zoom-btn active" data-zoom="0">0</button>
             <button class="zoom-btn" data-zoom="1">1</button>
@@ -186,11 +197,24 @@
                 this.loadedImages = new Map(); // 已加载的图片缓存
                 this.renderThrottle = null; // 渲染节流
 
+                // 实时瓦片加载状态
+                this.currentScreenTiles = 0; // 当前屏幕中的瓦片总数
+                this.currentLoadedTiles = 0; // 当前屏幕中已加载的瓦片数
+
+                // 初次加载优化
+                this.isInitialLoad = true; // 标记是否为初次加载
+                this.initialTilesLoaded = 0; // 已加载的瓦片数量
+                this.initialTilesTotal = 0; // 初次需要加载的瓦片总数
+
                 this.mapContainer = document.getElementById('map-container');
                 this.mapCanvas = document.getElementById('map-canvas');
                 this.currentZoomSpan = document.getElementById('current-zoom');
                 this.coordXSpan = document.getElementById('coord-x');
                 this.coordYSpan = document.getElementById('coord-y');
+                
+                // 加载进度元素
+                this.loadedTilesSpan = document.getElementById('loaded-tiles');
+                this.totalTilesSpan = document.getElementById('total-tiles');
 
                 this.init();
             }
@@ -475,6 +499,9 @@
                 const requiredTiles = new Set();
                 const tilesToCreate = [];
                 
+                // 根据是否为初次加载选择缓冲区大小
+                const buffer = this.isInitialLoad ? this.tileSize * 1 : this.tileSize * 3;
+                
                 for (const [chunkKey, tiles] of Object.entries(zoomData)) {
                     tiles.forEach(tileFile => {
                         const match = tileFile.match(/r_(\d+)_([^_]+)_(\d+)_(\d+)\.png/);
@@ -487,8 +514,7 @@
                             const screenX = (tileX - this.centerX) * this.tileSize;
                             const screenY = (tileY - this.centerY) * this.tileSize;
                             
-                            // 检查是否在可视范围内（增大缓冲区用于流畅滚动）
-                            const buffer = this.tileSize * 3;
+                            // 检查是否在可视范围内
                             if (screenX >= -this.offsetX - buffer && 
                                 screenX <= -this.offsetX + this.viewportWidth + buffer &&
                                 screenY >= -this.offsetY - buffer && 
@@ -513,6 +539,16 @@
                             }
                         }
                     });
+                }
+                
+                // 更新当前屏幕瓦片统计
+                this.currentScreenTiles = requiredTiles.size;
+                this.updateCurrentTileProgress();
+                
+                // 如果是初次加载，记录需要加载的瓦片总数
+                if (this.isInitialLoad && tilesToCreate.length > 0) {
+                    this.initialTilesTotal = tilesToCreate.length;
+                    this.initialTilesLoaded = 0;
                 }
                 
                 // 移除不再需要的瓦片
@@ -543,10 +579,38 @@
                 this.updateCoordinates();
             }
 
+            // 更新当前瓦片加载进度
+            updateCurrentTileProgress() {
+                // 统计当前活跃瓦片中已加载的数量
+                this.currentLoadedTiles = 0;
+                this.activeTiles.forEach(tile => {
+                    if (tile.classList.contains('loaded')) {
+                        this.currentLoadedTiles++;
+                    }
+                });
+                
+                this.loadedTilesSpan.textContent = this.currentLoadedTiles;
+                this.totalTilesSpan.textContent = this.currentScreenTiles;
+            }
+
+            // 检查初次加载是否完成
+            checkInitialLoadComplete() {
+                if (this.isInitialLoad && this.initialTilesLoaded >= this.initialTilesTotal && this.initialTilesTotal > 0) {
+                    console.log('初次加载完成，切换到大缓冲区模式');
+                    this.isInitialLoad = false;
+                    
+                    // 延迟一下再重新渲染，确保所有动画都完成了
+                    setTimeout(() => {
+                        this.render(); // 使用大缓冲区重新渲染，预加载更多瓦片
+                    }, 500);
+                }
+            }
+
             // 创建瓦片元素
             createTile(tileInfo) {
                 // 检查缓存中是否有可复用的瓦片
                 let tile = this.tileCache.get(tileInfo.key);
+                let isFromCache = false;
                 
                 if (!tile) {
                     // 创建新瓦片
@@ -559,6 +623,8 @@
                     
                     // 缓存瓦片
                     this.tileCache.set(tileInfo.key, tile);
+                } else {
+                    isFromCache = true;
                 }
                 
                 // 更新位置
@@ -571,6 +637,15 @@
                 // 添加到DOM（如果还没有添加）
                 if (!tile.parentNode) {
                     this.mapCanvas.appendChild(tile);
+                    
+                    // 如果是从缓存中取出的瓦片，重新触发动画
+                    if (isFromCache && tile.classList.contains('loaded')) {
+                        // 临时移除loaded类，重新触发动画
+                        tile.classList.remove('loaded');
+                        requestAnimationFrame(() => {
+                            tile.classList.add('loaded');
+                        });
+                    }
                 }
             }
 
@@ -584,6 +659,15 @@
                     if (cachedImage.complete && cachedImage.naturalHeight !== 0) {
                         tile.style.backgroundImage = `url(${cachedImage.src})`;
                         tile.classList.add('loaded');
+                        
+                        // 更新瓦片加载进度
+                        this.updateCurrentTileProgress();
+                        
+                        // 如果是初次加载，增加计数
+                        if (this.isInitialLoad) {
+                            this.initialTilesLoaded++;
+                            this.checkInitialLoadComplete();
+                        }
                         return;
                     }
                 }
@@ -594,8 +678,16 @@
                     tile.style.backgroundImage = `url(./map/${tileInfo.file})`;
                     requestAnimationFrame(() => {
                         tile.classList.add('loaded');
+                        // 更新瓦片加载进度
+                        this.updateCurrentTileProgress();
                     });
                     this.loadedImages.set(imageKey, img);
+                    
+                    // 如果是初次加载，增加计数并检查是否完成
+                    if (this.isInitialLoad) {
+                        this.initialTilesLoaded++;
+                        this.checkInitialLoadComplete();
+                    }
                 };
                 img.onerror = () => {
                     // 如果图片加载失败，显示占位符
@@ -603,7 +695,15 @@
                     tile.innerHTML = `<div style="padding: 10px; font-size: 10px; color: #999;">${tileInfo.x},${tileInfo.y}<br>Layer: ${tileInfo.chunk}<br>Z: ${tileInfo.zIndex}</div>`;
                     requestAnimationFrame(() => {
                         tile.classList.add('loaded');
+                        // 更新瓦片加载进度
+                        this.updateCurrentTileProgress();
                     });
+                    
+                    // 即使加载失败也要增加计数
+                    if (this.isInitialLoad) {
+                        this.initialTilesLoaded++;
+                        this.checkInitialLoadComplete();
+                    }
                 };
                 
                 img.src = `./map/${tileInfo.file}`;
